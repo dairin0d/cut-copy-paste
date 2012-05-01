@@ -30,4 +30,4 @@ Contact information
 -------------------
 
 Upload Tracker:
-... (no tracker yet)
+http://projects.blender.org/tracker/index.php?func=detail&aid=31214
