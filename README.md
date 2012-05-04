@@ -3,7 +3,7 @@ Cut/Copy/Paste
 
 This addon makes it possible to cut/copy/paste objects and elements across different layers, scenes and Blender files.
 
-When enabled, it would add a Copy/Paste panel to the Tool Shelf, and register Ctrl+X, Ctrl+C, Ctrl+V shortcuts for 3D view.
+When enabled, it would add a Copy/Paste panel to the Tool Shelf, and register Ctrl+X, Ctrl+C, Ctrl+V, Shift+Delete, Ctrl+Insert, Shift+Insert shortcuts for 3D view.
 
 Options:
 * External: if enabled, Copy in Object mode would save current .blend file (so that it can be accessed from other instances of Blender).
@@ -13,7 +13,7 @@ Options:
 * Align to view: if enabled, the pasted selection would be rotated to match the original orientation relative to the view.
 * Coordinate System: depending on this setting, geometry/bones would be pasted either in the absolute coordinates, or relative to the active object/bone.
 
-NOTE: currently cut/copy/paste operations are implemented only for objects.
+NOTE: currently cut/copy/paste operations are implemented only for objects and for mesh data.
 
 Installing
 ----------
