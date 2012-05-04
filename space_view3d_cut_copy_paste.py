@@ -20,9 +20,10 @@
 bl_info = {
     "name": "Cut/Copy/Paste objects and elements",
     "author": "dairin0d",
-    "version": (0, 5),
+    "version": (0, 6),
     "blender": (2, 6, 3),
-    "location": "View3D -> Ctrl+X, Ctrl+C, Ctrl+V",
+    "location": "View3D -> Ctrl+X, Ctrl+C, Ctrl+V, "\
+                "Shift+Delete, Ctrl+Insert, Shift+Insert",
     "description": "Cut/Copy/Paste objects and elements",
     "warning": "",
     "wiki_url": "http://wiki.blender.org/index.php/Extensions:2.6/Py/"\
