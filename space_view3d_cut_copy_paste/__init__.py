@@ -15,23 +15,22 @@
 #
 #  ***** END GPL LICENSE BLOCK *****
 
-# <pep8-80 compliant>
-
 bl_info = {
     "name": "Cut/Copy/Paste objects and elements",
-    "author": "dairin0d",
-    "version": (0, 6),
-    "blender": (2, 6, 3),
-    "location": "View3D -> Ctrl+X, Ctrl+C, Ctrl+V, "\
-                "Shift+Delete, Ctrl+Insert, Shift+Insert",
     "description": "Cut/Copy/Paste objects and elements",
+    "author": "dairin0d",
+    "version": (0, 6, 2),
+    "blender": (2, 7, 0),
+    "location": "View3D -> Ctrl+X, Ctrl+C, Ctrl+V, Shift+Delete, Ctrl+Insert, Shift+Insert",
     "warning": "",
-    "wiki_url": "http://wiki.blender.org/index.php/Extensions:2.6/Py/"\
-                "Scripts/3D_interaction/CutCopyPaste3D",
-    "tracker_url": "http://projects.blender.org/tracker/"\
-                   "?func=detail&aid=31214",
+    "wiki_url": "http://wiki.blender.org/index.php/Extensions:2.6/Py/Scripts/3D_interaction/CutCopyPaste3D",
+    "tracker_url": "http://projects.blender.org/tracker/?func=detail&aid=31214",
     "category": "3D View"}
 #============================================================================#
+
+if "dairin0d" in locals():
+    import imp
+    imp.reload(dairin0d)
 
 import bpy
 import bmesh
@@ -53,6 +52,36 @@ import io
 
 from collections import deque
 
+try:
+    import dairin0d
+    dairin0d_location = ""
+except ImportError:
+    dairin0d_location = "."
+
+exec("""
+from {0}dairin0d.utils_ui import NestedLayout, tag_redraw
+from {0}dairin0d.utils_view3d import SmartView3D
+from {0}dairin0d.utils_userinput import KeyMapUtils
+from {0}dairin0d.bpy_inspect import prop, BlRna, BlEnums
+from {0}dairin0d.utils_blender import ToggleObjectMode
+from {0}dairin0d.utils_addon import AddonManager
+""".format(dairin0d_location))
+
+addon = AddonManager()
+
+#============================================================================#
+
+"""
+Feature requests / bugs:
+* fix edit-mode copying (maybe try to make it even more general, for easier adjustment to the changes in API?)
+    * in particular, there was a problem with freestyle-related data
+* provide customization of keymaps and of the options with which the operators are invoked
+
+Starting with some version, Blender has copy/paste (but not cut) for objects.
+It can paste even in a different file, but it will always append everything
+(i.e. each time an object is pasted, a copy of its materials is added).
+"""
+
 # Blender ~bugs:
 # - Transform operator should revert to default snap mode if Ctrl status
 #   is released (if Ctrl was held when the operator was called, it would
@@ -67,8 +96,7 @@ from collections import deque
 # There seems to be no meaningful copy/paste for particles/lattice
 # Surface copy/paste is quite limited, since only whole patches can
 # be safely pasted.
-copy_paste_modes = {'OBJECT', 'EDIT_MESH', 'EDIT_CURVE', 'EDIT_SURFACE',
-                    'EDIT_ARMATURE', 'EDIT_METABALL'}
+copy_paste_modes = {'OBJECT', 'EDIT_MESH', 'EDIT_CURVE', 'EDIT_SURFACE', 'EDIT_ARMATURE', 'EDIT_METABALL'}
 
 def compress_b64(b):
     # Somewhat strangely, compresslevel=1 not just works twice as fast
@@ -118,7 +146,13 @@ def def_read_funcs(_stream):
         elem[layer] = read(unpack('!B', read(1))[0])
     
     def deserializer_deform(elem, layer):
-        pass # Not implemented in Blender yet
+        dvert = elem[layer]
+        if not hasattr(dvert, "items"): return # Blender supports this since some version
+        count = unpack('!i', read(4))[0]
+        for i in range(count):
+            group_index = unpack('!i', read(4))[0]
+            weight = unpack('!f', read(4))[0]
+            dvert[group_index] = weight
     
     def deserializer_vector(elem, layer):
         elem[layer] = unpack('!ddd', read(24))
@@ -131,7 +165,19 @@ def def_read_funcs(_stream):
         elem[layer].uv = unpack('!ff', read(8))
     
     def deserializer_tex(elem, layer):
-        pass # Not implemented in Blender yet
+        facetex = elem[layer]
+        if not hasattr(facetex, "image"):
+            return # Blender supports this since some version
+        else:
+            pass # TODO
+    
+    def deserializer_skin(value):
+        elem[layer].radius = unpack('!ff', read(8))
+        elem[layer].use_loose = unpack('!?', read(1))[0]
+        elem[layer].use_root = unpack('!?', read(1))[0]
+    
+    def deserializer_freestyle(value):
+        pass # Not implemented as of Blender 2.74
     
     return {k:v for k, v in locals().items() if not k.startswith("_")}
 
@@ -156,7 +202,14 @@ def def_write_funcs(_stream):
         write(value)
     
     def serializer_deform(value):
-        pass # Not implemented in Blender yet
+        if not hasattr(value, "items"):
+            write(pack('!i', 0)) # Blender supports this since some version
+        else:
+            items = value.items()
+            write(pack('!i', len(items)))
+            for group_index, weight in items:
+                write(pack('!i', group_index))
+                write(pack('!f', weight))
     
     def serializer_vector(value):
         write(pack('!ddd', *value))
@@ -169,7 +222,18 @@ def def_write_funcs(_stream):
         write(pack('!ff', *value.uv))
     
     def serializer_tex(value):
-        pass # Not implemented in Blender yet
+        if not hasattr(value, "image"):
+            return # Blender supports this since some version
+        else:
+            pass # TODO
+    
+    def serializer_skin(value):
+        write(pack('!ff', *value.radius))
+        write(pack('!?', value.use_loose))
+        write(pack('!?', value.use_root))
+    
+    def serializer_freestyle(value):
+        pass # Not implemented as of Blender 2.74
     
     return {k:v for k, v in locals().items() if not k.startswith("_")}
 
@@ -236,8 +300,7 @@ class ChunkReader:
         self.stream.seek(self.end)
 
 def is_view3d(context):
-    return ((context.area.type == 'VIEW_3D') and
-            (context.region.type == 'WINDOW'))
+    return ((context.area.type == 'VIEW_3D') and (context.region.type == 'WINDOW'))
 
 def get_view_rotation(context):
     v3d = context.space_data
@@ -294,123 +357,39 @@ def data_clipboard_path():
     resource_path = bpy.utils.resource_path('LOCAL') # USER SYSTEM
     return os.path.normcase(os.path.join(resource_path, "clipboard.data"))
 
-class ToggleObjectMode:
-    def __init__(self, mode='OBJECT'):
-        if not isinstance(mode, str):
-            mode = ('OBJECT' if mode else None)
-        
-        self.mode = mode
-    
-    def __enter__(self):
-        if self.mode:
-            edit_preferences = bpy.context.user_preferences.edit
-            
-            self.global_undo = edit_preferences.use_global_undo
-            self.prev_mode = bpy.context.object.mode
-            
-            if self.prev_mode != self.mode:
-                edit_preferences.use_global_undo = False
-                bpy.ops.object.mode_set(mode=self.mode)
-        
-        return self
-    
-    def __exit__(self, type, value, traceback):
-        if self.mode:
-            edit_preferences = bpy.context.user_preferences.edit
-            
-            if self.prev_mode != self.mode:
-                bpy.ops.object.mode_set(mode=self.prev_mode)
-                edit_preferences.use_global_undo = self.global_undo
-
-class CopyPasteOptions(bpy.types.PropertyGroup):
-    external = bpy.props.BoolProperty(
-        name="External",
-        description="Allow copy/paste to/from other file(s)",
-        default=True,
-        )
-    append = bpy.props.BoolProperty(
-        name="Append",
-        description="Append new objects (instead of link)",
-        default=True,
-        )
-    paste_at_cursor = bpy.props.BoolProperty(
-        name="Paste at Cursor",
-        description="Paste at the Cursor "\
-            "(instead of the coordinate system origin)",
-        default=True,
-        )
-    move_to_mouse = bpy.props.BoolProperty(
-        name="Move to mouse",
-        description="Align pivot of pasted objects to the mouse location",
-        default=True,
-        )
-    align_to_view = bpy.props.BoolProperty(
-        name="Align to view",
-        description="Rotate pasted objects to match their orientation "\
-            "relative to view when they were copied",
-        default=False,
-        )
-    coordinate_system = bpy.props.EnumProperty(
-        name="Coordinate System",
-        description="A coordinate system to copy/paste in "\
-            "(ignored in Object mode)",
-        default='CONTEXT',
-        items=[
-            ('CONTEXT', "Context", "Local in Edit mode, Global otherwise"),
-            ('GLOBAL', "Global", "Global"),
-            ('LOCAL', "Local", "Local"),
-        ]
-        )
-    
-    def actual_coordsystem(self, context=None):
-        if self.coordinate_system == 'CONTEXT':
-            if 'EDIT' in (context or bpy.context).mode:
-                return 'LOCAL'
-            else:
-                return 'GLOBAL'
-        return self.coordinate_system
-
-class VIEW3D_PT_copy_paste(bpy.types.Panel):
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'TOOLS'
-    bl_label = "Copy/Paste"
-    
+@addon.Panel(space_type='VIEW_3D', region_type='TOOLS', category="Tools", label="Copy/Paste")
+class VIEW3D_PT_copy_paste:
     coordsystem_icons = {'GLOBAL':'WORLD', 'LOCAL':'MANIPUL'}
     
     def draw(self, context):
-        layout = self.layout
+        layout = NestedLayout(self.layout)
         
-        opts = context.window_manager.copy_paste_options
+        opts = addon.preferences
         
-        row = layout.row(True)
-        row.enabled = (context.mode in copy_paste_modes)
-        
-        row.prop(opts, "external", text="", icon='URL')
-        row.prop(opts, "append", text="", icon='LINK_BLEND')
-        row.prop(opts, "paste_at_cursor", text="", icon='CURSOR')
-        row.prop(opts, "move_to_mouse", text="", icon='RESTRICT_SELECT_OFF')
-        row.prop(opts, "align_to_view", text="", icon='CAMERA_DATA')
-        
-        coordsystem = opts.actual_coordsystem(context)
-        icon = self.coordsystem_icons[coordsystem]
-        row.prop_menu_enum(opts, "coordinate_system", text="", icon=icon)
+        with layout.row(True)(enabled=(context.mode in copy_paste_modes)):
+            layout.prop(opts, "external", text="", icon='URL')
+            layout.prop(opts, "append", text="", icon='LINK_BLEND')
+            layout.prop(opts, "link_ghost_objects", text="", icon='GHOST_DISABLED')
+            layout.prop(opts, "paste_at_cursor", text="", icon='CURSOR')
+            layout.prop(opts, "move_to_mouse", text="", icon='RESTRICT_SELECT_OFF')
+            layout.prop(opts, "align_to_view", text="", icon='CAMERA_DATA')
+            
+            coordsystem = opts.actual_coordsystem(context)
+            icon = self.coordsystem_icons[coordsystem]
+            layout.prop_menu_enum(opts, "coordinate_system", text="", icon=icon)
 
-class OperatorCopy(bpy.types.Operator):
-    '''Copy objects/elements'''
-    bl_idname = "view3d.copy"
-    bl_label = "Copy objects/elements"
-    
-    force_copy = bpy.props.BoolProperty(default=False, options={'HIDDEN'})
+@addon.Operator(idname="view3d.copy", label="Copy objects/elements", description="Copy objects/elements")
+class OperatorCopy:
+    force_copy = False | -prop()
     
     @classmethod
     def poll(cls, context):
-        if context.mode not in copy_paste_modes:
-            return False
+        if context.mode not in copy_paste_modes: return False
         return context.selected_objects
     
     def write_object(self, json_data, context):
         wm = context.window_manager
-        opts = wm.copy_paste_options
+        opts = addon.preferences
         
         self_is_clipboard = False
         
@@ -485,6 +464,8 @@ class OperatorCopy(bpy.types.Operator):
         serializer_color = iofuncs["serializer_color"]
         serializer_uv = iofuncs["serializer_uv"]
         serializer_tex = iofuncs["serializer_tex"]
+        serializer_skin = iofuncs["serializer_skin"]
+        serializer_freestyle = iofuncs["serializer_freestyle"]
         
         serializers = {}
         serializers["verts.float"] = serializer_float
@@ -493,12 +474,14 @@ class OperatorCopy(bpy.types.Operator):
         serializers["verts.bevel_weight"] = serializer_float
         serializers["verts.deform"] = serializer_deform
         serializers["verts.shape"] = serializer_vector
+        serializers["verts.skin"] = serializer_skin
         
         serializers["edges.float"] = serializer_float
         serializers["edges.int"] = serializer_int
         serializers["edges.string"] = serializer_string
         serializers["edges.bevel_weight"] = serializer_float
         serializers["edges.crease"] = serializer_float
+        serializers["edges.freestyle"] = serializer_freestyle
         
         serializers["loops.float"] = serializer_float
         serializers["loops.int"] = serializer_int
@@ -510,6 +493,7 @@ class OperatorCopy(bpy.types.Operator):
         serializers["faces.int"] = serializer_int
         serializers["faces.string"] = serializer_string
         serializers["faces.tex"] = serializer_tex
+        serializers["faces.freestyle"] = serializer_freestyle
         
         # A ~bug? Iterating layers.*.items() yields BMLayerItem,
         # and iterating layers.*.values() yields (item_name, BMLayerItem)
@@ -762,7 +746,7 @@ class OperatorCopy(bpy.types.Operator):
     
     def execute(self, context):
         wm = context.window_manager
-        opts = wm.copy_paste_options
+        opts = addon.preferences
         
         json_data = {"content":"Blender 3D-clipboard"}
         
@@ -818,11 +802,8 @@ class OperatorCopy(bpy.types.Operator):
         
         return {'FINISHED'}
 
-class OperatorPaste(bpy.types.Operator):
-    '''Paste objects/elements'''
-    bl_idname = "view3d.paste"
-    bl_label = "Paste objects/elements"
-    
+@addon.Operator(idname="view3d.paste", label="Paste objects/elements", description="Paste objects/elements")
+class OperatorPaste:
     data_types = {'OBJECT', 'MESH', 'CURVE', 'SURFACE', 'META', 'ARMATURE'}
     
     @classmethod
@@ -917,8 +898,7 @@ class OperatorPaste(bpy.types.Operator):
             self.pivot_active_count += 1
     
     def calc_transform(self, context, obj):
-        wm = context.window_manager
-        opts = wm.copy_paste_options
+        opts = addon.preferences
         coordsystem = opts.actual_coordsystem(context)
         not_local = (coordsystem != 'LOCAL')
         if not_local:
@@ -937,8 +917,7 @@ class OperatorPaste(bpy.types.Operator):
         
         bpy.ops.object.select_all(action='DESELECT')
         
-        wm = context.window_manager
-        opts = wm.copy_paste_options
+        opts = addon.preferences
         
         scene = context.scene
         
@@ -1007,12 +986,18 @@ class OperatorPaste(bpy.types.Operator):
         # In Object mode the coordsystem option is not used
         # (ambiguous and the same effects can be achieved
         # relatively easily)
+        
+        if opts.link_ghost_objects:
+            # make sure all groups' objects are present at least in 1 scene (so that they can be deleted)
+            # (to circumvent the [intentional] Blender behavior reported in https://developer.blender.org/T44890)
+            for group in bpy.data.groups:
+                for obj in group.objects:
+                    if obj.users_scene: continue
+                    scene.objects.link(obj)
     
     def process_mesh(self, context, stream):
         if context.mode not in {'OBJECT', 'EDIT_MESH', 'EDIT_CURVE'}:
-            self.report({'WARNING'},
-                        "Mesh data can be pasted only in Object, "\
-                        "Edit Mesh and Edit Curve modes")
+            self.report({'WARNING'}, "Mesh data can be pasted only in Object, Edit Mesh and Edit Curve modes")
             return True
         
         if context.mode == 'EDIT_CURVE':
@@ -1208,6 +1193,8 @@ class OperatorPaste(bpy.types.Operator):
         deserializer_color = iofuncs["deserializer_color"]
         deserializer_uv = iofuncs["deserializer_uv"]
         deserializer_tex = iofuncs["deserializer_tex"]
+        deserializer_skin = iofuncs["deserializer_skin"]
+        deserializer_freestyle = iofuncs["deserializer_freestyle"]
         
         deserializers = {}
         deserializers["verts.float"] = deserializer_float
@@ -1216,12 +1203,14 @@ class OperatorPaste(bpy.types.Operator):
         deserializers["verts.bevel_weight"] = deserializer_float
         deserializers["verts.deform"] = deserializer_deform
         deserializers["verts.shape"] = deserializer_vector
+        deserializers["verts.skin"] = deserializer_skin
         
         deserializers["edges.float"] = deserializer_float
         deserializers["edges.int"] = deserializer_int
         deserializers["edges.string"] = deserializer_string
         deserializers["edges.bevel_weight"] = deserializer_float
         deserializers["edges.crease"] = deserializer_float
+        deserializers["edges.freestyle"] = deserializer_freestyle
         
         deserializers["loops.float"] = deserializer_float
         deserializers["loops.int"] = deserializer_int
@@ -1233,6 +1222,7 @@ class OperatorPaste(bpy.types.Operator):
         deserializers["faces.int"] = deserializer_int
         deserializers["faces.string"] = deserializer_string
         deserializers["faces.tex"] = deserializer_tex
+        deserializers["faces.freestyle"] = deserializer_freestyle
         
         if 'EDIT' in obj.mode:
             bm = bmesh.from_edit_mesh(obj.data)
@@ -1358,42 +1348,32 @@ class OperatorPaste(bpy.types.Operator):
     
     def process_curve(self, context):
         if context.mode not in {'OBJECT', 'EDIT_MESH', 'EDIT_CURVE'}:
-            self.report({'WARNING'},
-                        "Curve data can be pasted only in Object, "\
-                        "Edit Mesh and Edit Curve modes")
+            self.report({'WARNING'}, "Curve data can be pasted only in Object, Edit Mesh and Edit Curve modes")
             return True
     
     def process_surface(self, context):
         if context.mode not in {'OBJECT', 'EDIT_SURFACE'}:
-            self.report({'WARNING'},
-                        "Surface data can be pasted only in Object "\
-                        "and Edit Surface modes")
+            self.report({'WARNING'}, "Surface data can be pasted only in Object and Edit Surface modes")
             return True
     
     def process_meta(self, context):
         if context.mode not in {'OBJECT', 'EDIT_MESH', 'EDIT_METABALL'}:
-            self.report({'WARNING'},
-                        "Metaelement data can be pasted only in Object, "\
-                        "Edit Mesh and Edit Meta modes")
+            self.report({'WARNING'}, "Metaelement data can be pasted only in Object, Edit Mesh and Edit Meta modes")
             return True
     
     def process_armature(self, context):
         if context.mode not in {'OBJECT', 'EDIT_MESH', 'EDIT_ARMATURE'}:
-            self.report({'WARNING'},
-                        "Armature data can be pasted only in Object, "\
-                        "Edit Mesh and Edit Armature modes")
+            self.report({'WARNING'}, "Armature data can be pasted only in Object, Edit Mesh and Edit Armature modes")
             return True
     
     def execute(self, context):
         try:
             self.read_clipboard(context)
         except (TypeError, KeyError, ValueError, AssertionError):
-            self.report({'WARNING'},
-                        "Incompatible format of clipboard data")
+            self.report({'WARNING'}, "Incompatible format of clipboard data")
             return True
         
-        wm = context.window_manager
-        opts = wm.copy_paste_options
+        opts = addon.preferences
         
         pivot_mode = context.space_data.pivot_point
         self.pivot_count = 0
@@ -1456,25 +1436,21 @@ class OperatorPaste(bpy.types.Operator):
             if opts.paste_at_cursor:
                 v3d = context.space_data
                 cursor = v3d.cursor_location
-                bpy.ops.transform.translate(value=(cursor - pivot),
-                                            proportional='DISABLED')
+                bpy.ops.transform.translate(value=(cursor - pivot), proportional='DISABLED')
                 pivot = cursor
             
             if opts.align_to_view:
                 view = get_view_rotation(context)
                 dq = view * self.view.inverted()
                 axis, angle = dq.to_axis_angle()
-                bpy.ops.transform.rotate('EXEC_SCREEN',
-                                         value=(angle,), axis=axis,
-                                         proportional='DISABLED')
+                bpy.ops.transform.rotate('EXEC_SCREEN', value=angle, axis=axis, proportional='DISABLED')
             
             if opts.move_to_mouse:
                 region = context.region
                 rv3d = context.region_data
                 coord = self.mouse_coord
                 dest = region_2d_to_location_3d(region, rv3d, coord, pivot)
-                bpy.ops.transform.translate(value=(dest - pivot),
-                                            proportional='DISABLED')
+                bpy.ops.transform.translate(value=(dest - pivot), proportional='DISABLED')
         
         bpy.ops.ed.undo_push(message="Paste")
         
@@ -1484,11 +1460,8 @@ class OperatorPaste(bpy.types.Operator):
         self.mouse_coord = Vector((event.mouse_region_x, event.mouse_region_y))
         return self.execute(context)
 
-class OperatorCut(bpy.types.Operator):
-    '''Cut objects/elements'''
-    bl_idname = "view3d.cut"
-    bl_label = "Cut objects/elements"
-    
+@addon.Operator(idname="view3d.cut", label="Cut objects/elements", description="Cut objects/elements")
+class OperatorCut:
     @classmethod
     def poll(cls, context):
         return bpy.ops.view3d.copy.poll()
@@ -1535,7 +1508,7 @@ class OperatorCut(bpy.types.Operator):
             # Maybe just use Delete operator? (if it doesn't create Undo entry)
             for obj in list(context.selected_objects):
                 context.scene.objects.unlink(obj)
-                # Also: totally remove if they have zero users?
+                # Don't remove if they have zero users, since they are still needed for appending/linking
                 if obj.users == 0:
                     bpy.data.objects.remove(obj)
         
@@ -1545,17 +1518,27 @@ class OperatorCut(bpy.types.Operator):
         
         return {'FINISHED'}
 
+@addon.Preferences.Include
+class ThisAddonPreferences:
+    external = True | prop("Allow copy/paste to/from other file(s)", "External")
+    append = True | prop("Append new objects (instead of link)", "Append")
+    link_ghost_objects = True | prop("When pasting, link to current scene all group objects that aren't linked to any scene", "Link ghost objects")
+    paste_at_cursor = True | prop("Paste at the Cursor (instead of the coordinate system origin)", "Paste at Cursor")
+    move_to_mouse = True | prop("Align pivot of pasted objects to the mouse location", "Move to mouse")
+    align_to_view = False | prop("Rotate pasted objects to match their orientation relative to view when they were copied", "Align to view")
+    coordinate_system = 'CONTEXT' | prop("A coordinate system to copy/paste in (ignored in Object mode)", "Coordinate System", items=[
+        ('CONTEXT', "Context", "Local in Edit mode, Global otherwise"),
+        ('GLOBAL', "Global", "Global"),
+        ('LOCAL', "Local", "Local"),
+    ])
+    def actual_coordsystem(self, context=None):
+        if self.coordinate_system == 'CONTEXT':
+            is_edit = ('EDIT' in (context or bpy.context).mode)
+            return ('LOCAL' if is_edit else 'GLOBAL')
+        return self.coordinate_system
+
 def register():
-    bpy.utils.register_class(CopyPasteOptions)
-    
-    bpy.utils.register_class(VIEW3D_PT_copy_paste)
-    
-    bpy.utils.register_class(OperatorCopy)
-    bpy.utils.register_class(OperatorPaste)
-    bpy.utils.register_class(OperatorCut)
-    
-    bpy.types.WindowManager.copy_paste_options = \
-        bpy.props.PointerProperty(type=CopyPasteOptions)
+    addon.register()
     
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
@@ -1572,21 +1555,10 @@ def unregister():
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     if kc:
-        km = kc.keymaps['3D View']
-        for kmi in km.keymap_items:
-            if kmi.idname in ('view3d.copy', 'view3d.paste', 'view3d.cut'):
-                km.keymap_items.remove(kmi)
+        # Note: if we remove from non-addon keyconfigs, the keymap registration
+        # won't work on the consequent addon enable/reload (until Blender restarts)
+        KeyMapUtils.remove("view3d.copy", place=kc)
+        KeyMapUtils.remove("view3d.paste", place=kc)
+        KeyMapUtils.remove("view3d.cut", place=kc)
     
-    if hasattr(bpy.types.Scene, "copy_paste_options"):
-        del bpy.types.Scene.copy_paste_options
-    
-    bpy.utils.unregister_class(OperatorCut)
-    bpy.utils.unregister_class(OperatorPaste)
-    bpy.utils.unregister_class(OperatorCopy)
-    
-    bpy.utils.unregister_class(VIEW3D_PT_copy_paste)
-    
-    bpy.utils.unregister_class(CopyPasteOptions)
-
-if __name__ == "__main__":
-    register()
+    addon.unregister()
