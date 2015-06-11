@@ -19,7 +19,7 @@ bl_info = {
     "name": "Cut/Copy/Paste objects and elements",
     "description": "Cut/Copy/Paste objects and elements",
     "author": "dairin0d",
-    "version": (0, 6, 2),
+    "version": (0, 6, 3),
     "blender": (2, 7, 0),
     "location": "View3D -> Ctrl+X, Ctrl+C, Ctrl+V, Shift+Delete, Ctrl+Insert, Shift+Insert",
     "warning": "",
@@ -317,7 +317,8 @@ def make_clipboard_path():
     # LOCAL is blender's executable location,
     # and Blender must always start from ASCII path
     # (at least until non-ASCII problems are fixed)
-    resource_path = bpy.utils.resource_path('LOCAL') # USER SYSTEM
+    #resource_path = bpy.utils.resource_path('LOCAL') # USER SYSTEM
+    resource_path = bpy.app.tempdir
     
     lib_paths = set(os.path.normcase(bpy.path.abspath(lib.filepath))
                     for lib in bpy.data.libraries)
@@ -1432,7 +1433,7 @@ class OperatorPaste:
         elif pivot_mode == 'CURSOR':
             pivot = self.cursor
         
-        if is_view3d(context):
+        if is_view3d(context) and opts.append:
             if opts.paste_at_cursor:
                 v3d = context.space_data
                 cursor = v3d.cursor_location
@@ -1454,7 +1455,10 @@ class OperatorPaste:
         
         bpy.ops.ed.undo_push(message="Paste")
         
-        return bpy.ops.transform.transform('INVOKE_DEFAULT')
+        if opts.append:
+            return bpy.ops.transform.transform('INVOKE_DEFAULT')
+        else:
+            return {'FINISHED'}
     
     def invoke(self, context, event):
         self.mouse_coord = Vector((event.mouse_region_x, event.mouse_region_y))
